@@ -11,5 +11,5 @@ Work in progress, obviously.
 
 1. [Boot plan](./boot-plan.md)
 1. [Network topology](./network-topology.md)
-1. [BitSmugler VPN](./bitsmugler-vpn.md)
+1. [BitVPN](./bitvpn.md)
 1. [Idempotence and impermanence](./idempotence-and-impermanence.md)
