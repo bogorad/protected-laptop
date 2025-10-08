@@ -1,6 +1,6 @@
 # Secure Laptop Configuration Documentation
 
-These are preliminary musings that reflect my research towards my plan to create
+These are preliminary musings that reflect research towards my plan to create
 a reproducible, turn-key configuration for a personal/business laptop that can
 be safely carried anywhere, with good protection against data theft, forced disclosure,
 having good deniability, and protected network access.
