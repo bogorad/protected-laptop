@@ -1,0 +1,169 @@
+# OpenWrt UCI configuration for VLAN trunking setup
+# This file is used with 'uci batch' to configure the OpenWrt VM
+
+# Clear existing network configuration to avoid conflicts
+delete network.@device[0]
+delete network.br0
+delete network.eth0_dev
+
+# System identity
+set system.@system[0].hostname='ow-mini'
+set system.@system[0].zonename='UTC'
+set system.@system[0].timezone='UTC'
+
+# Network device: single bridge br-lan with VLAN filtering
+set network.br_lan=device
+set network.br_lan.name='br-lan'
+set network.br_lan.type='bridge'
+add_list network.br_lan.ports='eth0'
+
+# VLAN bridge configurations
+set network.vlan1_bv=bridge-vlan
+set network.vlan1_bv.device='br-lan'
+set network.vlan1_bv.vlan='1'
+add_list network.vlan1_bv.ports='eth0:u*'
+
+set network.vlan10_bv=bridge-vlan
+set network.vlan10_bv.device='br-lan'
+set network.vlan10_bv.vlan='10'
+add_list network.vlan10_bv.ports='eth0:t'
+
+set network.vlan11_bv=bridge-vlan
+set network.vlan11_bv.device='br-lan'
+set network.vlan11_bv.vlan='11'
+add_list network.vlan11_bv.ports='eth0:t'
+
+set network.vlan12_bv=bridge-vlan
+set network.vlan12_bv.device='br-lan'
+set network.vlan12_bv.vlan='12'
+add_list network.vlan12_bv.ports='eth0:t'
+
+set network.vlan13_bv=bridge-vlan
+set network.vlan13_bv.device='br-lan'
+set network.vlan13_bv.vlan='13'
+add_list network.vlan13_bv.ports='eth0:t'
+
+set network.vlan99_bv=bridge-vlan
+set network.vlan99_bv.device='br-lan'
+set network.vlan99_bv.vlan='99'
+add_list network.vlan99_bv.ports='eth0:t'
+
+# Interface configurations per VLAN
+set network.lan=interface
+set network.lan.device='br-lan.1'
+set network.lan.proto='static'
+set network.lan.ipaddr='10.77.0.1'
+set network.lan.netmask='255.255.255.0'
+
+set network.vlan10=interface
+set network.vlan10.device='br-lan.10'
+set network.vlan10.proto='static'
+set network.vlan10.ipaddr='10.77.10.1'
+set network.vlan10.netmask='255.255.255.0'
+
+set network.vlan11=interface
+set network.vlan11.device='br-lan.11'
+set network.vlan11.proto='static'
+set network.vlan11.ipaddr='10.77.11.1'
+set network.vlan11.netmask='255.255.255.0'
+
+set network.vlan12=interface
+set network.vlan12.device='br-lan.12'
+set network.vlan12.proto='static'
+set network.vlan12.ipaddr='10.77.12.1'
+set network.vlan12.netmask='255.255.255.0'
+
+set network.vlan13=interface
+set network.vlan13.device='br-lan.13'
+set network.vlan13.proto='static'
+set network.vlan13.ipaddr='10.77.13.1'
+set network.vlan13.netmask='255.255.255.0'
+
+set network.vlan99=interface
+set network.vlan99.device='br-lan.99'
+set network.vlan99.proto='static'
+set network.vlan99.ipaddr='10.77.99.1'
+set network.vlan99.netmask='255.255.255.0'
+
+# DHCP configurations per VLAN
+set dhcp.lan=dhcp
+set dhcp.lan.interface='lan'
+set dhcp.lan.start='100'
+set dhcp.lan.limit='150'
+set dhcp.lan.leasetime='12h'
+
+set dhcp.vlan10=dhcp
+set dhcp.vlan10.interface='vlan10'
+set dhcp.vlan10.start='100'
+set dhcp.vlan10.limit='150'
+set dhcp.vlan10.leasetime='12h'
+
+set dhcp.vlan11=dhcp
+set dhcp.vlan11.interface='vlan11'
+set dhcp.vlan11.start='100'
+set dhcp.vlan11.limit='150'
+set dhcp.vlan11.leasetime='12h'
+
+set dhcp.vlan12=dhcp
+set dhcp.vlan12.interface='vlan12'
+set dhcp.vlan12.start='100'
+set dhcp.vlan12.limit='150'
+set dhcp.vlan12.leasetime='12h'
+
+set dhcp.vlan13=dhcp
+set dhcp.vlan13.interface='vlan13'
+set dhcp.vlan13.start='100'
+set dhcp.vlan13.limit='150'
+set dhcp.vlan13.leasetime='12h'
+
+set dhcp.vlan99=dhcp
+set dhcp.vlan99.interface='vlan99'
+set dhcp.vlan99.start='100'
+set dhcp.vlan99.limit='150'
+set dhcp.vlan99.leasetime='12h'
+
+# Firewall zones per VLAN (no inter-VLAN forwarding by default)
+set firewall.lan=zone
+set firewall.lan.name='lan'
+add_list firewall.lan.network='lan'
+set firewall.lan.input='ACCEPT'
+set firewall.lan.output='ACCEPT'
+set firewall.lan.forward='REJECT'
+
+set firewall.vlan10=zone
+set firewall.vlan10.name='vlan10'
+add_list firewall.vlan10.network='vlan10'
+set firewall.vlan10.input='ACCEPT'
+set firewall.vlan10.output='ACCEPT'
+set firewall.vlan10.forward='REJECT'
+
+set firewall.vlan11=zone
+set firewall.vlan11.name='vlan11'
+add_list firewall.vlan11.network='vlan11'
+set firewall.vlan11.input='ACCEPT'
+set firewall.vlan11.output='ACCEPT'
+set firewall.vlan11.forward='REJECT'
+
+set firewall.vlan12=zone
+set firewall.vlan12.name='vlan12'
+add_list firewall.vlan12.network='vlan12'
+set firewall.vlan12.input='ACCEPT'
+set firewall.vlan12.output='ACCEPT'
+set firewall.vlan12.forward='REJECT'
+
+set firewall.vlan13=zone
+set firewall.vlan13.name='vlan13'
+add_list firewall.vlan13.network='vlan13'
+set firewall.vlan13.input='ACCEPT'
+set firewall.vlan13.output='ACCEPT'
+set firewall.vlan13.forward='REJECT'
+
+set firewall.vlan99=zone
+set firewall.vlan99.name='vlan99'
+add_list firewall.vlan99.network='vlan99'
+set firewall.vlan99.input='ACCEPT'
+set firewall.vlan99.output='ACCEPT'
+set firewall.vlan99.forward='REJECT'
+
+# Commit all changes
+commit

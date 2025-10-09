@@ -1,0 +1,21 @@
+table inet nat {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    
+    # BYPASS: Local networks
+    iifname "eth0" ip daddr 192.168.0.0/16 accept
+    iifname "eth0" ip daddr 10.77.77.1 accept
+    iifname "eth0" ip daddr 127.0.0.0/8 accept
+    
+    # REDIRECT: Everything from eth0 to xray
+    iifname "eth0" tcp dport != 1080 redirect to :1080
+    iifname "eth0" udp dport != 1080 redirect to :1080
+  }
+
+  # DELETE THE OUTPUT CHAIN ENTIRELY
+
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "wlan0" masquerade
+  }
+}
