@@ -1,592 +1,363 @@
-# NixOS Transparent Proxy with USB WiFi Pass-through and Xray
+## owtest: NixOS VLAN Testing Environment with OpenWrt VM
 
-## Introduction
+This document explains the architecture, files, build/deploy steps, and troubleshooting for the "owtest" VLAN testing environment. It is intended for humans and LLMs to quickly get the full context.
 
-This project implements a **transparent proxy system** using a NixOS MicroVM with USB WiFi pass-through and Xray-core. The setup provides seamless routing of all network traffic through a remote VLESS/XTLS proxy server while maintaining local LAN connectivity.
+### High-level overview
 
-### Why This Architecture?
+- **Proxmox** (spino.bruc) hosts VM 204 named "owtest" running NixOS
+- **NixOS host** runs libvirt/qemu with an OpenWrt guest named "owtest-openwrt"
+- **Single bridge** (br0) at 10.77.0.2/24 connects host and OpenWrt VM
+- **VLAN trunking** on single interface provides 6 isolated networks (VLANs 1, 10, 11, 12, 13, 99)
+- **External UCI configuration** approach for flexible VLAN management
+- **Immutable base image** with ephemeral qcow2 overlay for clean testing iterations
 
-The journey to this solution involved solving several interconnected challenges:
+ASCII diagram:
 
-1. **USB WiFi Pass-through**: Hardware-level USB device pass-through to a lightweight VM allows the host system to remain on wired LAN while the guest provides an independent internet connection via WiFi.
+Proxmox (spino.bruc)
+└─ VM 204: NixOS (host "owtest")
+├─ ens18 (DHCP on upstream, 192.168.11.50)
+└─ br0 (10.77.0.2/24) ── vnet0 ──────────────┐
+│
+OpenWrt VM (owtest-openwrt) │
+└─ eth0 (MAC 0e:00:00:00:ee:00) → br0 ───────┘
+├─ VLAN 1 (untagged): 10.77.0.1/24
+├─ VLAN 10: 10.77.10.1/24
+├─ VLAN 11: 10.77.11.1/24
+├─ VLAN 12: 10.77.12.1/24
+├─ VLAN 13: 10.77.13.1/24
+└─ VLAN 99: 10.77.99.1/24
 
-2. **Transparent Proxying**: Rather than configuring each application individually, all traffic from the host is automatically routed through Xray using Linux netfilter (nftables) transparent redirection.
+### Key properties
 
-3. **Split Routing**: Local LAN traffic (192.168.0.0/16) bypasses the proxy for performance and compatibility, while all internet-bound traffic goes through the encrypted VLESS tunnel.
+- No libvirt default network (virbr0) is used; the single NIC is attached to host bridge br0.
+- OpenWrt uses VLAN trunking on a single interface to provide multiple isolated networks.
+- Each VLAN has its own subnet (10.77.x.0/24) with OpenWrt as the gateway (.1).
+- Host has static IP on br0, so you can reach OpenWrt's default VLAN at 10.77.0.1 from the host.
 
-4. **Declarative Infrastructure**: The entire system—from host networking to guest configuration to proxy rules—is defined in NixOS configuration files, making it reproducible and version-controlled.
+---
 
-### Key Design Decisions
+## Code layout
 
-**Why MicroVM instead of containers?**
-- USB device pass-through requires kernel-level access
-- Separate network namespace for true isolation
-- Full NixOS environment in guest for advanced networking
+- **Host module and assets**
+  - `default.nix` — Streamlined NixOS config
+  - `disk-config-owtest.nix` — Disk partitioning configuration for disko
+  - `owtest-openwrt.xml` — libvirt domain XML template with overlay path substitution
+  - `rebuild-owtest-enhanced.sh` — Complete Proxmox VM creation and deployment script
+  - `ow-config.uci` — External OpenWrt UCI configuration for setup (VLAN & more)
+- **OpenWrt image definition**
+  - `../images/openwrt-vm/my-x86-ow.nix` — ImageBuilder parameters and base configuration
 
-**Why manual wpa_supplicant instead of NetworkManager?**
-- Minimal dependencies in a headless VM
-- Deterministic configuration from SOPS secrets
-- No conflicts with systemd-networkd
+Small excerpts (see files for full content):
 
-**Why dokodemo-door instead of SOCKS5?**
-- Supports transparent proxy mode (`followRedirect: true`)
-- Works with nftables REDIRECT target
-- No application-level configuration needed
+- Domain XML with single NIC and MAC
+  <augment_code_snippet path="nx-ago-testing/hosts/owtest/owtest-openwrt.xml" mode="EXCERPT">
 
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Host: owtest (192.168.11.50)                                │
-│                                                              │
-│  ┌────────────┐         ┌──────────────────────────────┐   │
-│  │  ens18     │────────▶│ LAN Gateway 192.168.11.1     │   │
-│  │ (Wired)    │         │ (Direct access to 192.168.*)  │   │
-│  └────────────┘         └──────────────────────────────┘   │
-│                                                              │
-│  ┌────────────┐                                             │
-│  │   br0      │ 10.77.77.2/24                               │
-│  │ (Bridge)   │                                             │
-│  └─────┬──────┘                                             │
-│        │                                                     │
-│        │ Route: 0.0.0.0/0 → 10.77.77.1 (metric 200)        │
-│        │ Route: 192.168.0.0/16 → 192.168.11.1 (metric 100) │
-│        │                                                     │
-└────────┼─────────────────────────────────────────────────────┘
-         │
-         │ virtio-net
-         ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Guest: xray-vm (MicroVM)                                     │
-│                                                              │
-│  ┌────────────┐         ┌──────────────┐                    │
-│  │   eth0     │         │  nftables    │                    │
-│  │ 10.77.77.1 │────────▶│  REDIRECT    │                    │
-│  │            │         │  → :1080     │                    │
-│  └────────────┘         └──────┬───────┘                    │
-│                                │                             │
-│                         ┌──────▼───────┐                    │
-│                         │   Xray       │                    │
-│                         │ dokodemo-door│                    │
-│                         │  port 1080   │                    │
-│                         └──────┬───────┘                    │
-│                                │                             │
-│                                │ VLESS/XTLS                 │
-│                                ▼                             │
-│  ┌────────────┐         ┌──────────────┐                    │
-│  │   wlan0    │────────▶│ WiFi AP      │                    │
-│  │192.168.13.*│         │192.168.13.1  │                    │
-│  │            │         │              │                    │
-│  └────────────┘         └──────────────┘                    │
-│       ▲                                                      │
-│       │                                                      │
-│       │ USB pass-through (0e8d:7961)                        │
-│       └──────────────────────────────────────────────────── │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-                            │
-                            │ Internet
-                            ▼
-                   ┌────────────────────┐
-                   │ Remote Xray Server │
-                   │  xray.bogorad.eu   │
-                   │    VLESS/XTLS      │
-                   └────────────────────┘
+```xml
+<interface type='bridge'>
+  <mac address='0e:00:00:00:ee:00'/>
+  <source bridge='br0'/>
+</interface>
 ```
 
-## Traffic Flow
+</augment_code_snippet>
 
-### Local LAN Access (192.168.0.0/16)
-```
-Host → ens18 → LAN Gateway → Destination
-```
-Direct routing, no proxy.
-
-### Internet Access via Proxy
-```
-Host app → br0 (10.77.77.2)
-    ↓
-Guest eth0 (10.77.77.1)
-    ↓
-nftables REDIRECT → :1080
-    ↓
-Xray dokodemo-door
-    ↓
-Xray outbound (VLESS/XTLS)
-    ↓
-wlan0 (192.168.13.113) + NAT
-    ↓
-WiFi → Internet → Remote Xray Server
-    ↓
-Destination (with remote server's IP)
-```
-
-## Component Details
-
-### Host Configuration
-
-#### Bridge Network (br0)
-```nix
-systemd.network.netdevs."20-br0".netdevConfig = {
-  Name = "br0";
-  Kind = "bridge";
-};
-```
-
-Creates a virtual bridge for host-guest communication. The bridge exists without physical interfaces attached (`ConfigureWithoutCarrier = "yes"`).
-
-#### Static Routing
+- Host installs XML and defines/starts the domain
+  <augment_code_snippet path="nx-ago-testing/hosts/owtest/default.nix" mode="EXCERPT">
 
 ```nix
-routes = [
-  {
-    routeConfig = {
-      Destination = "192.168.0.0/16";
-      Gateway = "192.168.11.1";
-      Metric = 100;
-    };
-  }
-  {
-    routeConfig = {
-      Destination = "0.0.0.0/0";
-      Gateway = "10.77.77.1";
-      Metric = 200;
-    };
-  }
-];
+environment.etc."libvirt/qemu/owtest-openwrt.xml".text =
+  builtins.replaceStrings [ "@OVERLAY@" ] [ overlayPath ]
+    (builtins.readFile ./owtest-openwrt.xml);
 ```
 
-**Why these routes?**
-- Metric 100 for LAN: High priority (lower number = higher priority)
-- Metric 200 for default: Lower priority, used when no more specific route matches
-- This implements split-tunneling: local traffic direct, everything else via proxy
+</augment_code_snippet>
 
-#### USB Pass-through
+- **External UCI configuration approach**
+  <augment_code_snippet path="hosts/owtest/ow-config.uci" mode="EXCERPT">
 
-```nix
-services.udev.extraRules = ''
-  SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7961", GROUP="kvm"
-'';
+```uci
+# Bridge device with VLAN filtering
+set network.br_lan=device
+set network.br_lan.name='br-lan'
+set network.br_lan.type='bridge'
+add_list network.br_lan.ports='eth0'
+
+# VLAN 1 (untagged default)
+set network.vlan1_bv=bridge-vlan
+set network.vlan1_bv.device='br-lan'
+set network.vlan1_bv.vlan='1'
+add_list network.vlan1_bv.ports='eth0:u*'
+
+# Tagged VLANs (10, 11, 12, 13, 99)
+set network.vlan10_bv=bridge-vlan
+set network.vlan10_bv.device='br-lan'
+set network.vlan10_bv.vlan='10'
+add_list network.vlan10_bv.ports='eth0:t'
+# ... complete configuration in ow-config.uci
 ```
 
-**Critical requirement**: QEMU (which runs the MicroVM) needs access to the USB device. By default, USB devices are owned by `root:root`. This rule changes group ownership to `kvm`, allowing QEMU to access it.
+</augment_code_snippet>
 
-Find your device IDs:
-```bash
-lsusb
-# Bus 002 Device 002: ID 0e8d:7961 MediaTek Inc. Wireless_Device
-#                        ^^^^:^^^^
-#                        vendor:product
-```
+---
 
-### Guest Configuration (MicroVM)
+## Networking design
 
-#### Resource Allocation
+- Host bridge (systemd-networkd):
+  - br0: 10.77.0.2/24 (single bridge for all VLANs)
+- OpenWrt guest:
+  - eth0 (virtio on br0) → VLAN trunk with multiple networks:
+    - VLAN 1 (untagged): 10.77.0.1/24 (default LAN)
+    - VLAN 10: 10.77.10.1/24
+    - VLAN 11: 10.77.11.1/24
+    - VLAN 12: 10.77.12.1/24
+    - VLAN 13: 10.77.13.1/24
+    - VLAN 99: 10.77.99.1/24
+- DHCP: enabled by OpenWrt for all VLAN networks
+- MAC convention:
+  - eth0: 0e:00:00:00:ee:00 (single interface for all VLANs)
+  - This locally administered MAC must be consistent between the libvirt XML and the OpenWrt image UCI defaults.
 
-```nix
-microvm.hypervisor = "qemu";
-microvm.vcpu = 1;
-microvm.mem = 512;
-microvm.balloon = true;
-microvm.deflateOnOOM = true;
-```
+Why VLAN trunking instead of multiple bridges?
 
-**Why these values?**
-- 1 vCPU: Sufficient for network routing and proxy operations
-- 512MB: Enough for base NixOS + xray + wpa_supplicant
-- Balloon: Memory can be reclaimed by host when guest isn't using it
-- DeflateOnOOM: Automatically reclaim balloon memory if guest runs low
+- Simplifies host configuration while providing network isolation
+- Single NIC handles multiple networks through VLAN tagging
+- More realistic simulation of enterprise network setups
 
-#### USB Device Assignment
+Why not virbr0?
 
-```nix
-microvm.devices = [
-  {
-    bus = "usb";
-    path = "vendorid=0x0e8d,productid=0x7961";
-  }
-];
-```
+- libvirt's default NAT network (virbr0) doesn't exist or isn't desired here; we want the guest NIC on a real host bridge with explicit addressing for predictable routing and testing.
 
-This passes the physical USB WiFi adapter directly to the guest VM. The device disappears from the host and appears as a native USB device inside the guest.
+---
 
-#### Firmware Loading
+## Storage model for the OpenWrt guest
 
-```nix
-hardware.enableRedistributableFirmware = true;
-hardware.firmware = with pkgs; [ linux-firmware ];
-```
+- Base immutable raw image derived from the built OpenWrt artifact (gz or raw) is produced into the Nix store (openwrt-base.img).
+- At runtime, an ephemeral qcow2 overlay is created in /run/openwrt/owtest-openwrt.qcow2 referencing the store base (copy-on-write).
+- On boot, a oneshot service ensures the overlay exists before defining the domain.
 
-**Why needed?**
-MediaTek MT7921 WiFi chipset requires firmware files (`mt7921u.bin`, etc.) to initialize. Without this, you'd see kernel errors:
-```
-mt7921u: Failed to get patch semaphore
-```
+Pros:
 
-The `linux-firmware` package contains these binary blobs.
+- No mutation of the base image; clean reboots; fast rebuilds.
+- Overlay lives under /run (tmpfs) → ephemeral by design.
 
-#### Secrets Sharing
+---
 
-```nix
-microvm.shares = [
-  {
-    source = "/run/secrets";
-    mountPoint = "/run/secrets-from-host";
-    tag = "host-secrets";
-    proto = "virtiofs";
-  }
-];
-```
+## Host services and libvirt management
 
-**Design choice**: Rather than implementing SOPS in both host and guest, the host decrypts secrets (via sops-nix) and shares them as plain files to the guest via virtio-fs. The guest reads them at runtime to generate `wpa_supplicant.conf`.
+**Service Architecture:**
 
-#### Network Interface Names
+- **Direct libvirt management**
+- **Streamlined service chain** with proper dependencies
+- **External UCI configuration** for flexible VLAN management
 
-```nix
-boot.kernelParams = [
-  "net.ifnames=0"
-  "ipv6.disable=1"
-];
-```
+**Key Services:**
 
-**Why disable predictable names?**
-- Consistent naming: `eth0`, `wlan0` instead of `enp0s5`, `wlp0s6u1`
-- Simpler configuration: No need to handle MAC-based renaming
-- Race condition fix: Avoids wpa_supplicant starting before interface rename completes
+1. **prepare-owtest-overlay** — Creates qcow2 overlay referencing immutable base image
+2. **owtest-define-openwrt** — Manages libvirt domain (undefine/define/autostart/start)
+3. **ow-config-deploy** — Deploys external UCI configuration via SSH/SCP
+4. **clone-nix-config** — Clones repository for system management (runs as root)
 
-**Why disable IPv6?**
-- Simplifies firewall rules (no need for ip6tables equivalent)
-- Reduces attack surface
-- Not needed for this use case (can be re-enabled if required)
+**Configuration:**
 
-#### Static IP Configuration
+- Bridge whitelist: `virtualisation.libvirtd.allowedBridges = [ "br0" ]`
+- XML template with overlay path substitution at activation
+- External UCI file approach eliminates embedded configuration complexity
 
-```nix
-systemd.network.networks."10-uplink" = {
-  matchConfig.Name = "eth0";
-  networkConfig = {
-    Address = "10.77.77.1/24";
-    DNS = [ "1.1.1.1" "8.8.8.8" ];
-  };
-  routes = [
-    {
-      routeConfig = {
-        Gateway = "10.77.77.2";
-        Destination = "10.77.77.0/24";
-      };
-    }
-  ];
-};
-```
+---
 
-**Why no default gateway?**
-- Guest uses wlan0 for internet, not eth0
-- eth0 is only for receiving traffic from host
-- Prevents routing loops
+## OpenWrt image build (Nix)
 
-#### WiFi Configuration
+- Defined in nx-ago-testing/images/openwrt-vm/my-x86-ow.nix using a "build" function that wraps OpenWrt ImageBuilder.
+- Important details:
+  - release = "24.10.3"; target = x86_64 generic
+  - SSH authorized_keys preloaded to /etc/dropbear/authorized_keys from GitHub user keys
+  - UCI defaults create basic network configuration; VLAN setup is applied post-boot via ow-mini-deploy service
 
-**Why manual wpa_supplicant?**
+The flake exports a package used by the host module to locate the combined image artifacts (gz or raw) and derive the base raw.
 
-NixOS's `networking.wireless` module generates its own configuration file and ignores custom configs. For secrets management via SOPS, we need control over the config file generation.
+---
 
-```nix
-systemd.services.wpa-supplicant-setup = {
-  # ...
-  script = ''
-    SSID=$(cat /run/secrets-from-host/wifi-bruc/main/ssid)
-    PSK=$(cat /run/secrets-from-host/wifi-bruc/main/pass)
-    
-    cat > /etc/wpa_supplicant.conf <<EOF
-    network={
-      ssid="$SSID"
-      psk="$PSK"
-      key_mgmt=WPA-PSK
-    }
-    EOF
-  '';
-};
-```
+## Build and deploy workflow
 
-This service runs before `wpa-supplicant-manual`, reading secrets and generating the config at boot time.
+### Method 1: Complete VM Rebuild (Full Deployment)
 
-#### Firewall Disable
-
-```nix
-networking.firewall.enable = false;
-```
-
-**Critical**: NixOS's default firewall blocks incoming connections. Since we need transparent proxy functionality (accepting all traffic on port 1080), we disable it entirely. Security is handled by:
-1. Host firewall
-2. Network isolation (guest only accessible from host via bridge)
-3. Remote Xray server authentication
-
-### nftables Configuration
-
-```nft
-table inet nat {
-  chain prerouting {
-    type nat hook prerouting priority dstnat; policy accept;
-    
-    # BYPASS
-    iifname "eth0" ip daddr 192.168.0.0/16 accept
-    iifname "eth0" ip daddr 10.77.77.1 accept
-    iifname "eth0" ip daddr 127.0.0.0/8 accept
-    
-    # REDIRECT
-    iifname "eth0" tcp dport != 1080 redirect to :1080
-    iifname "eth0" udp dport != 1080 redirect to :1080
-  }
-  
-  chain postrouting {
-    type nat hook postrouting priority srcnat; policy accept;
-    oifname "wlan0" masquerade
-  }
-}
-```
-
-#### PREROUTING Chain
-
-**Purpose**: Intercept packets as they arrive on eth0, before routing decision.
-
-**Bypass rules**:
-- `192.168.0.0/16`: Local LAN traffic goes direct
-- `10.77.77.1`: Traffic to guest itself (e.g., SSH)
-- `127.0.0.0/8`: Loopback (shouldn't happen but explicit)
-
-**Redirect rule**:
-- `tcp dport != 1080`: Everything except xray itself
-- `redirect to :1080`: Changes destination IP/port to 127.0.0.1:1080
-- Connection tracking remembers the original destination
-
-#### POSTROUTING Chain
-
-**Purpose**: Modify packets as they leave wlan0.
-
-**Masquerade**:
-- Changes source IP from 10.77.77.2 → 192.168.13.113
-- Why needed? WiFi router can't route responses to 10.77.77.2 (private bridge IP)
-- Connection tracking reverses this on return packets
-
-**Why no OUTPUT chain?**
-Without OUTPUT chain rules, traffic **originating from the guest itself** (e.g., xray making outbound connections) goes directly out without being redirected back to xray—preventing infinite loops.
-
-### Xray Configuration
-
-```json
-{
-  "inbounds": [
-    {
-      "port": 1080,
-      "protocol": "dokodemo-door",
-      "settings": {
-        "network": "tcp,udp",
-        "followRedirect": true
-      }
-    }
-  ]
-}
-```
-
-**dokodemo-door** ("anywhere door" in Japanese):
-- Accepts connections on port 1080
-- `followRedirect: true`: Reads original destination from `SO_ORIGINAL_DST` socket option (set by nftables REDIRECT)
-- Doesn't require SOCKS handshake—works transparently
-
-```json
-{
-  "outbounds": [
-    {
-      "protocol": "vless",
-      "settings": {
-        "vnext": [{
-          "address": "xray.bogorad.eu",
-          "users": [{
-            "flow": "xtls-rprx-vision",
-            "encryption": "none"
-          }]
-        }]
-      },
-      "streamSettings": {
-        "security": "tls",
-        "tlsSettings": {
-          "fingerprint": "chrome",
-          "serverName": "xray.bogorad.eu"
-        }
-      }
-    }
-  ]
-}
-```
-
-**VLESS with XTLS-Vision**:
-- VLESS: Lightweight protocol, minimal overhead
-- XTLS: TLS splice—inner TLS (to destination) uses outer TLS (to proxy) session
-- Vision: Flow control to mimic HTTPS behavior, evading DPI
-
-## Deployment
-
-### Prerequisites
-
-1. NixOS host with flakes enabled
-2. Proxmox hypervisor (for automated deployment script)
-3. SOPS-encrypted WiFi credentials
-4. Remote Xray server with VLESS configured
-
-### Build and Deploy
+**Script:** `rebuild-owtest-enhanced.sh`
 
 ```bash
-# Build locally first (catches errors early)
-nixos-rebuild build --flake .#owtest
-
-# Deploy to Proxmox VM (fully automated)
-./scripts/rebuild-owtest-enhanced.sh
+./hosts/owtest/rebuild-owtest-enhanced.sh
 ```
 
-The deployment script:
-1. Destroys existing VM
-2. Creates new VM with proper USB mapping
-3. Boots NixOS installer ISO
-4. Runs `nixos-anywhere` to install system
-5. Reboots into final system
-6. Waits for MicroVM to start
-7. Validates connectivity
+**What it does:**
 
-### Manual Deployment
+- Destroys and recreates VM 204 on Proxmox with fresh disk
+- Installs NixOS using nixos-anywhere with flake `#owtest`
+- Waits for services to complete with enhanced diagnostics
+- Verifies VLAN interfaces and connectivity
+- Provides comprehensive status reporting
+
+**Requirements:**
+
+- `just`, `ssh`, `nc`, `nix` with flakes
+- Justfile target `ssr` for remote command execution
+- Access to Proxmox host (spino.bruc)
+
+### Method 2: Configuration Updates (Recommended for Development)
+
+**Remote rebuild from local machine:**
 
 ```bash
-# On an existing NixOS system:
-nixos-rebuild switch --flake .#owtest
-
-# Check MicroVM status
-systemctl status microvm@xray-vm.service
-
-# Connect to guest console
-sudo socat STDIO,cfmakeraw unix:/var/lib/microvms/xray-vm/console.sock
+nixos-rebuild switch --flake .#owtest --target-host root@192.168.11.50
 ```
 
-## Verification
+**Benefits:**
 
-### From Host
+- ✅ Fast iteration (builds locally, deploys remotely)
+- ✅ Uses current local changes (even uncommitted)
+- ✅ No dependency on remote git repository
+- ✅ Standard NixOS deployment mechanism
+
+### Automatic OpenWrt Setup
+
+**On system activation:**
+
+1. **prepare-owtest-overlay** → Creates `/run/openwrt/owtest-openwrt.qcow2`
+2. **owtest-define-openwrt** → Defines and starts libvirt domain
+3. **ow-config-deploy** → Applies external UCI configuration via SSH/SCP
+4. **Enhanced diagnostics** → Verifies VLAN interfaces and connectivity
+
+**Verification:**
+
+- All 6 VLAN interfaces should be UP with correct IP addresses
+- Default VLAN (10.77.0.1) should be reachable from host
+- Other VLANs properly isolated (10.77.10.1, 10.77.11.1, etc.)
+
+---
+
+## Customization guide
+
+### VLAN Configuration (Most Common)
 
 ```bash
-# Check routing table
-ip route
-# Should show:
-# default via 192.168.11.1 dev ens18 metric 1024
-# 0.0.0.0/0 via 10.77.77.1 dev br0 metric 200
-# 192.168.0.0/16 via 192.168.11.1 dev br0 metric 100
+# Edit external UCI configuration
+vim hosts/owtest/ow-config.uci
 
-# Test local LAN access (direct)
-curl http://192.168.11.1
-
-# Test internet via proxy
-curl --interface br0 https://ifconfig.me
-# Should show remote Xray server's IP, not WiFi IP
-
-# Monitor traffic on bridge
-sudo tcpdump -i br0 -n
+# Deploy changes
+nixos-rebuild switch --flake .#owtest --target-host root@192.168.11.50
 ```
 
-### From Guest
+### Other Customizations
 
-```bash
-# Check interfaces
-ip addr show
-# Should show eth0 (10.77.77.1) and wlan0 (192.168.13.x)
+- **OpenWrt packages/base config:** Edit `../images/openwrt-vm/my-x86-ow.nix`
+- **Host bridge addressing:** Modify `systemd.network.networks` in `default.nix`
+- **VM hardware/MAC:** Update `owtest-openwrt.xml` (ensure MAC consistency)
+- **Service behavior:** Adjust systemd services in `default.nix`
 
-# Check WiFi connection
-wpa_cli status
-# Should show state=COMPLETED
+### Development Workflow
 
-# Check xray
-journalctl -u xray.service -n 50
+1. Make changes to configuration files
+2. Test with `nixos-rebuild switch --flake .#owtest --target-host root@192.168.11.50`
+3. Verify VLAN interfaces with enhanced diagnostics
+4. Iterate quickly without full VM rebuilds
 
-# Test direct internet (from guest)
-curl https://ifconfig.me
-# Should show WiFi IP (not proxied)
-```
+---
 
 ## Troubleshooting
 
-### WiFi Not Connecting
+### Service Issues
 
 ```bash
-# Inside guest
-systemctl status wpa-supplicant-manual
-journalctl -u wpa-supplicant-manual -n 100
+# Check service status
+ssh root@192.168.11.50 'systemctl --failed'
 
-# Check if interface is up
-ip link show wlan0
-
-# Scan for networks
-iw dev wlan0 scan | grep SSID
-
-# Check secrets
-cat /run/secrets-from-host/wifi-bruc/main/ssid
+# Check specific service logs
+ssh root@192.168.11.50 'journalctl -u ow-config-deploy.service -n 50'
+ssh root@192.168.11.50 'journalctl -u owtest-define-openwrt.service -n 50'
 ```
 
-### Proxy Not Working
+### VLAN Configuration Issues
 
 ```bash
-# Check nftables rules
-nft list ruleset
+# Verify VLAN interfaces on OpenWrt
+ssh root@192.168.11.50 'ssh root@10.77.0.1 "ip a | grep br-lan"'
 
-# Check connection tracking
-cat /proc/net/nf_conntrack | grep 1080
+# Check UCI configuration
+ssh root@192.168.11.50 'ssh root@10.77.0.1 "uci show network | grep -E \"(vlan|bridge)\""'
 
-# Check xray logs
-journalctl -u xray.service -f
-
-# Verify from host
-sudo tcpdump -i br0 -n port 1080
+# Manual UCI deployment
+scp hosts/owtest/ow-config.uci root@192.168.11.50:/tmp/
+ssh root@192.168.11.50 'scp /tmp/ow-config.uci root@10.77.0.1:/tmp/ && ssh root@10.77.0.1 "uci batch < /tmp/ow-config.uci && /etc/init.d/network restart"'
 ```
 
-### USB Pass-through Issues
+### Network Connectivity
 
 ```bash
-# On host
-lsusb
-# Device should NOT appear if passed to guest
+# Test VLAN connectivity
+ssh root@192.168.11.50 'ping -c 2 10.77.0.1'   # Default VLAN
+ssh root@192.168.11.50 'ping -c 2 10.77.10.1'  # VLAN 10 (should timeout - isolated)
 
-# Check udev rules
-udevadm info /dev/bus/usb/002/002 | grep GROUP
-
-# Check QEMU process
-ps aux | grep qemu | grep usb
-
-# Inside guest
-lsusb
-# Device SHOULD appear here
-dmesg | grep mt7921
+# Check bridge and interfaces
+ssh root@192.168.11.50 'ip link show master br0'
+ssh root@192.168.11.50 'virsh domiflist owtest-openwrt'
 ```
 
-## Security Considerations
+---
 
-1. **Guest isolation**: MicroVM only accessible from host via bridge
-2. **Secrets**: WiFi credentials encrypted with SOPS, decrypted at boot
-3. **No firewall in guest**: Acceptable since guest is network-isolated
-4. **TLS verification**: Xray validates remote server certificate
-5. **USB security**: Only WiFi adapter passed through, no other USB devices
+## Quick verification commands
 
-## Performance
+### Enhanced Diagnostics (Built-in)
 
-- **Latency overhead**: ~2-5ms (guest networking + NAT)
-- **Throughput**: Limited by WiFi bandwidth (not CPU)
-- **Memory**: Guest uses ~100MB actual, 512MB allocated
-- **CPU**: <1% on idle, ~5-10% under load
+The rebuild script includes comprehensive diagnostics that automatically verify:
 
-## Future Improvements
+- All 6 VLAN interfaces are UP with correct IP addresses
+- UCI configuration is properly applied
+- Network connectivity tests for each VLAN
+- Service status and system health
 
-1. **Automatic failover**: Switch to wired connection if WiFi fails
-2. **Policy routing**: Different applications via different proxies
-3. **IPv6 support**: Add if needed
-4. **Multiple WiFi networks**: Automatic selection based on signal strength
-5. **Connection metering**: Track bandwidth usage per application
+### Manual Verification
 
-## References
+```bash
+# System status
+ssh root@192.168.11.50 'hostnamectl && ip -o addr show'
 
-- [MicroVM.nix](https://github.com/astro/microvm.nix): Lightweight VMs for NixOS
-- [Xray-core](https://github.com/XTLS/Xray-core): Proxy platform
-- [nftables](https://netfilter.org/projects/nftables/): Linux packet filtering
-- [wpa_supplicant](https://w1.fi/wpa_supplicant/): WiFi authentication
+# OpenWrt VM status
+ssh root@192.168.11.50 'virsh dominfo owtest-openwrt && virsh domiflist owtest-openwrt'
+
+# VLAN interface verification
+ssh root@192.168.11.50 'ssh root@10.77.0.1 "ip a | grep br-lan"'
+
+# Connectivity tests
+ssh root@192.168.11.50 'ping -c 2 10.77.0.1'    # Default VLAN (should work)
+ssh root@192.168.11.50 'ping -c 2 10.77.10.1'   # VLAN 10 (should timeout - isolated)
+
+# OpenWrt system info
+ssh root@192.168.11.50 'ssh root@10.77.0.1 "ubus call system board"'
+```
+
+---
+
+## Maintenance & Updates
+
+### VLAN Configuration Updates
+
+```bash
+# Edit UCI configuration
+vim hosts/owtest/ow-config.uci
+
+# Deploy changes (fast)
+nixos-rebuild switch --flake .#owtest --target-host root@192.168.11.50
+```
+
+### System Updates
+
+- **OpenWrt release:** Update `../images/openwrt-vm/my-x86-ow.nix`
+- **Host services:** Modify `default.nix` systemd services
+- **Network addressing:** Adjust bridge configuration in `default.nix`
+
+### Development Cycle
+
+1. **Edit** configuration files locally
+2. **Deploy** with `nixos-rebuild --target-host`
+3. **Verify** with built-in diagnostics
+4. **Iterate** quickly without full VM rebuilds
+
+This environment provides a robust, maintainable platform for VLAN testing and network configuration development.
