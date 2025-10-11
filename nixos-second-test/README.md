@@ -92,7 +92,7 @@ The journey to this solution involved solving several interconnected challenges:
                             ▼
                    ┌────────────────────┐
                    │ Remote Xray Server │
-                   │  xray.bogorad.eu   │
+                   │  xray.endpoint.com │
                    │    VLESS/XTLS      │
                    └────────────────────┘
 ```
@@ -420,8 +420,7 @@ Without OUTPUT chain rules, traffic **originating from the guest itself** (e.g.,
       "settings": {
         "vnext": [
           {
-            "address": "xray.bogorad.eu",
-            "users": [
+            "address": "xray.endpoint.com": [
               {
                 "flow": "xtls-rprx-vision",
                 "encryption": "none"
@@ -434,7 +433,7 @@ Without OUTPUT chain rules, traffic **originating from the guest itself** (e.g.,
         "security": "tls",
         "tlsSettings": {
           "fingerprint": "chrome",
-          "serverName": "xray.bogorad.eu"
+          "serverName": "xray.endpoint.com"
         }
       }
     }

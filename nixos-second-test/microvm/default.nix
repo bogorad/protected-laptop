@@ -235,24 +235,28 @@ in
           RemainAfterExit = true;
         };
 
-        # This script runs inside the MicroVM at boot
         script = ''
           set -e
-          echo "Waiting for xray_uuid secret..."
-          while [ ! -f /run/secrets-from-host/xray_uuid ]; do
+          echo "Waiting for xray secrets..."
+          while [ ! -f /run/secrets-from-host/xray_uuid ] || [ ! -f /run/secrets-from-host/xray_endpoint ]; do
             sleep 1
           done
-          echo "Secret found. Generating config."
+          echo "Secrets found. Generating config."
 
           mkdir -p /run/xray
 
           XRAY_UUID=$(cat /run/secrets-from-host/xray_uuid)
+          XRAY_ENDPOINT=$(cat /run/secrets-from-host/xray_endpoint)
 
-          # Use jq to recursively find the placeholder "@@id@@" and replace it.
-          # The result is written to the final config location.
-          # We pass the UUID as an argument to jq to handle it safely.
-          ${pkgs.jq}/bin/jq --arg uuid "$XRAY_UUID" \
-            'walk(if . == "@@id@@" then $uuid else . end)' \
+          # Use jq to replace both placeholders
+          ${pkgs.jq}/bin/jq \
+            --arg uuid "$XRAY_UUID" \
+            --arg endpoint "$XRAY_ENDPOINT" \
+            'walk(
+              if . == "@@id@@" then $uuid
+              elif . == "@@endpoint@@" then $endpoint
+              else . end
+            )' \
             ${xrayConfigFile} > ${processedXrayConfigFile}
 
           chmod 644 ${processedXrayConfigFile}

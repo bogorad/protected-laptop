@@ -102,6 +102,7 @@ in
     "wifi_bruc/main/ssid" = SOPS_FILE;
     "wifi_bruc/main/pass" = SOPS_FILE;
     "xray_uuid" = SOPS_FILE;
+    "xray_endpoint" = SOPS_FILE;
   };
 
   # Basic system configuration
